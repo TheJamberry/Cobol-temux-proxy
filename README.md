@@ -30,7 +30,7 @@ The proxy itself only uses Python standard library modules.
 1. Clone the repository and copy the files to their final locations:
 
    ```bash
-   git clone https://example.com/Cobol-temux-proxy.git
+   git clone https://github.com/TheJamberry/Cobol-temux-proxy.git
    sudo rsync -a Cobol-temux-proxy/etc/ /etc/
    sudo rsync -a Cobol-temux-proxy/usr/ /usr/
    ```
