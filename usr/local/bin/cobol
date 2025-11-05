@@ -1,0 +1,81 @@
+        #!/usr/bin/env bash
+        set -euo pipefail
+        CFG="/etc/cobol-proxy/config.yml"
+        SESS="/etc/cobol-proxy/sessions.csv"
+
+        usage(){ cat <<EOF
+        Usage:
+          cobol list
+          cobol control <src_ip>
+          cobol ip-bind on|off
+          cobol ip-pool <CIDR>
+        EOF
+        exit 1; }
+
+        ensure_cfg(){
+          [[ -f "$CFG" ]] || cat > "$CFG" <<'YAML'
+        listen_host: "0.0.0.0"
+        listen_port: 2323
+        cobol_host: "10.0.0.25"
+        cobol_port: "23"
+        term_type: "vt100"
+        ip_bind: false
+        ip_pool_cidr: ""
+        bind_iface: "eth0"
+        admin_ips: []
+YAML
+          touch "$SESS"
+        }
+
+        set_kv(){
+          local key="$1" val="$2"
+          if grep -q "^${key}:" "$CFG"; then
+            sed -i "s#^${key}:.*#${key}: ${val}#g" "$CFG"
+          else
+            echo "${key}: ${val}" >> "$CFG"
+          fi
+        }
+
+        attach_tmux(){
+          local name="${1//:/_}"
+          exec /usr/bin/tmux attach -d -t "$name"
+        }
+
+        cmd="${1:-}"; [[ -z "$cmd" ]] && usage
+        ensure_cfg
+
+        case "$cmd" in
+          list)
+            echo -e "SRC_IP\tPOOL_IP\tTMUX"
+            awk -F, 'BEGIN{OFS="\t"} !/^#/ {print $1,$2}' "$SESS" | while read -r ip alloc; do
+              name="${ip//:/_}"
+              if /usr/bin/tmux has-session -t "$name" 2>/dev/null; then
+                echo -e "${ip}\t${alloc}\tRUNNING"
+              else
+                echo -e "${ip}\t${alloc}\tMISSING"
+              fi
+            done
+            ;;
+          control)
+            ip="${2:-}"; [[ -n "$ip" ]] || usage
+            attach_tmux "$ip"
+            ;;
+          ip-bind)
+            mode="${2:-}"; [[ "$mode" =~ ^(on|off)$ ]] || usage
+            val="false"; [[ "$mode" == "on" ]] && val="true"
+            set_kv "ip_bind" "$val"
+            systemctl restart cobol-ip-proxy
+            echo "ip_bind=${val}"
+            ;;
+          ip-pool)
+            cidr="${2:-}"; [[ -n "$cidr" ]] || usage
+            python3 - <<EOF >/dev/null || { echo "Invalid CIDR"; exit 2; }
+import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)
+EOF
+"$cidr"
+            set_kv "ip_pool_cidr" ""$cidr""
+            systemctl restart cobol-ip-proxy
+            echo "ip_pool_cidr=$cidr"
+            ;;
+          *) usage ;;
+        esac

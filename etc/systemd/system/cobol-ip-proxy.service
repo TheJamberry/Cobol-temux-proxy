@@ -1,0 +1,16 @@
+[Unit]
+Description=Single-port COBOL tmux proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/cobol-ip-proxy.py
+Restart=always
+RestartSec=1
+User=root
+Group=root
+LimitNOFILE=65535
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

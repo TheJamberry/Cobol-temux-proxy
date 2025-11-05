@@ -1,0 +1,9 @@
+listen_host: "0.0.0.0"
+listen_port: 2323
+cobol_host: "10.0.0.25"
+cobol_port: "23"
+term_type: "vt100"
+ip_bind: false
+ip_pool_cidr: ""
+bind_iface: "eth0"
+admin_ips: []
