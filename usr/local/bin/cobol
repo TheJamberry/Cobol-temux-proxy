@@ -1,81 +1,135 @@
-        #!/usr/bin/env bash
-        set -euo pipefail
-        CFG="/etc/cobol-proxy/config.yml"
-        SESS="/etc/cobol-proxy/sessions.csv"
+#!/usr/bin/env bash
+set -euo pipefail
 
-        usage(){ cat <<EOF
-        Usage:
-          cobol list
-          cobol control <src_ip>
-          cobol ip-bind on|off
-          cobol ip-pool <CIDR>
-        EOF
-        exit 1; }
+CFG="/etc/cobol-proxy/config.yml"
+SESS="/etc/cobol-proxy/sessions.csv"
+TMUX_BIN="${TMUX_BIN:-/usr/bin/tmux}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 
-        ensure_cfg(){
-          [[ -f "$CFG" ]] || cat > "$CFG" <<'YAML'
-        listen_host: "0.0.0.0"
-        listen_port: 2323
-        cobol_host: "10.0.0.25"
-        cobol_port: "23"
-        term_type: "vt100"
-        ip_bind: false
-        ip_pool_cidr: ""
-        bind_iface: "eth0"
-        admin_ips: []
+usage() {
+  cat <<'USAGE'
+Usage:
+  cobol list
+  cobol control <src_ip>
+  cobol ip-bind on|off
+  cobol ip-pool <CIDR>
+USAGE
+  exit 1
+}
+
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing required command: $cmd" >&2
+    exit 2
+  fi
+}
+
+ensure_cfg() {
+  if [[ ! -f "$CFG" ]]; then
+    install -Dm0640 /dev/null "$CFG"
+    cat >"$CFG" <<'YAML'
+listen_host: "0.0.0.0"
+listen_port: 2323
+cobol_host: "10.0.0.25"
+cobol_port: "23"
+term_type: "vt100"
+ip_bind: false
+ip_pool_cidr: ""
+bind_iface: "eth0"
+admin_ips: []
 YAML
-          touch "$SESS"
-        }
+  fi
+  if [[ ! -f "$SESS" ]]; then
+    install -Dm0640 /dev/null "$SESS"
+    printf '# src_ip,allocated_pool_ip\n' >"$SESS"
+  fi
+}
 
-        set_kv(){
-          local key="$1" val="$2"
-          if grep -q "^${key}:" "$CFG"; then
-            sed -i "s#^${key}:.*#${key}: ${val}#g" "$CFG"
-          else
-            echo "${key}: ${val}" >> "$CFG"
-          fi
-        }
+set_kv() {
+  local key="$1" value="$2"
+  python3 - "$CFG" "$key" "$value" <<'PY'
+import pathlib, re, sys
 
-        attach_tmux(){
-          local name="${1//:/_}"
-          exec /usr/bin/tmux attach -d -t "$name"
-        }
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+lines = []
+if path.exists():
+    lines = path.read_text().splitlines()
+pattern = re.compile(rf"^{re.escape(key)}\s*:")
+replaced = False
+for idx, line in enumerate(lines):
+    if pattern.match(line):
+        lines[idx] = f"{key}: {value}"
+        replaced = True
+        break
+if not replaced:
+    lines.append(f"{key}: {value}")
+path.write_text("\n".join(lines) + "\n")
+PY
+}
 
-        cmd="${1:-}"; [[ -z "$cmd" ]] && usage
-        ensure_cfg
+attach_tmux() {
+  local name
+  name="${1//:/_}"
+  exec "$TMUX_BIN" attach -t "$name"
+}
 
-        case "$cmd" in
-          list)
-            echo -e "SRC_IP\tPOOL_IP\tTMUX"
-            awk -F, 'BEGIN{OFS="\t"} !/^#/ {print $1,$2}' "$SESS" | while read -r ip alloc; do
-              name="${ip//:/_}"
-              if /usr/bin/tmux has-session -t "$name" 2>/dev/null; then
-                echo -e "${ip}\t${alloc}\tRUNNING"
-              else
-                echo -e "${ip}\t${alloc}\tMISSING"
-              fi
-            done
-            ;;
-          control)
-            ip="${2:-}"; [[ -n "$ip" ]] || usage
-            attach_tmux "$ip"
-            ;;
-          ip-bind)
-            mode="${2:-}"; [[ "$mode" =~ ^(on|off)$ ]] || usage
-            val="false"; [[ "$mode" == "on" ]] && val="true"
-            set_kv "ip_bind" "$val"
-            systemctl restart cobol-ip-proxy
-            echo "ip_bind=${val}"
-            ;;
-          ip-pool)
-            cidr="${2:-}"; [[ -n "$cidr" ]] || usage
-            python3 - <<EOF >/dev/null || { echo "Invalid CIDR"; exit 2; }
-import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)
-EOF
-"$cidr"
-            set_kv "ip_pool_cidr" ""$cidr""
-            systemctl restart cobol-ip-proxy
-            echo "ip_pool_cidr=$cidr"
-            ;;
-          *) usage ;;
-        esac
+restart_service() {
+  if command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+    "$SYSTEMCTL_BIN" restart cobol-ip-proxy
+  else
+    echo "systemctl not available; restart cobol-ip-proxy manually" >&2
+  fi
+}
+
+cmd="${1:-}"; [[ -z "$cmd" ]] && usage
+shift || true
+
+require_cmd "$TMUX_BIN"
+ensure_cfg
+
+case "$cmd" in
+  list)
+    printf 'SRC_IP\tPOOL_IP\tTMUX\n'
+    awk -F, 'BEGIN{OFS="\t"} !/^#/ && NF {print $1,$2}' "$SESS" | while read -r ip alloc; do
+      [[ -z "$ip" ]] && continue
+      name="${ip//:/_}"
+      if "$TMUX_BIN" has-session -t "$name" 2>/dev/null; then
+        status="RUNNING"
+      else
+        status="MISSING"
+      fi
+      printf '%s\t%s\t%s\n' "$ip" "$alloc" "$status"
+    done
+    ;;
+  control)
+    ip="${1:-}"; [[ -n "$ip" ]] || usage
+    attach_tmux "$ip"
+    ;;
+  ip-bind)
+    mode="${1:-}"; [[ "$mode" =~ ^(on|off)$ ]] || usage
+    value="false"
+    [[ "$mode" == "on" ]] && value="true"
+    set_kv "ip_bind" "$value"
+    restart_service
+    printf 'ip_bind=%s\n' "$value"
+    ;;
+  ip-pool)
+    cidr="${1:-}"; [[ -n "$cidr" ]] || usage
+    python3 - <<'PY' "$cidr"
+import ipaddress, sys
+try:
+    ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError as exc:
+    raise SystemExit(f"Invalid CIDR: {exc}")
+PY
+    set_kv "ip_pool_cidr" '"'"$cidr"'"'
+    restart_service
+    printf 'ip_pool_cidr=%s\n' "$cidr"
+    ;;
+  *)
+    usage
+    ;;
+esac
