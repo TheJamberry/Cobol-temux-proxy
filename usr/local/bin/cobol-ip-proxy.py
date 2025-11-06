@@ -46,11 +46,11 @@ async def run(*args, check=False):
     return out.decode(), err.decode(), proc.returncode
 
 async def tmux_has(name:str)->bool:
-    _,_,rc = await run(TMUX,"has-session","-t",name)
+    _,_,rc = await run(TMUX,"has-session","-t",f"={name}")
     return rc==0
 
 async def ensure_tmux_for_ip(src_ip:str, env:dict):
-    name = src_ip.replace(":", "_")
+    name = "ip_" + src_ip.replace(":", "_").replace(".", "_")
     if await tmux_has(name):
         return name
     env_cmd = ["/usr/bin/env"]
@@ -62,7 +62,7 @@ async def ensure_tmux_for_ip(src_ip:str, env:dict):
     return name
 
 async def tmux_detach_all(name:str):
-    await run(TMUX, "detach", "-a", "-s", name)
+    await run(TMUX, "detach", "-a", "-t", f"={name}")
 
 def set_raw(fd): tty.setraw(fd, termios.TCSANOW)
 
@@ -127,7 +127,7 @@ def maybe_allocate_src_ip(src_ip:str, cfg:dict, sessions:dict)->str|None:
 async def bridge(reader:asyncio.StreamReader, writer:asyncio.StreamWriter, tmux_name:str, detach_first:bool):
     pid, master_fd = pty.fork()
     if pid==0:
-        os.execl(TMUX, TMUX, "attach", "-t", tmux_name)
+        os.execl(TMUX, TMUX, "attach", "-t", f"={tmux_name}")
     set_raw(master_fd)
     loop=asyncio.get_running_loop()
     tmux_reader=asyncio.StreamReader()
