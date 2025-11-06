@@ -62,7 +62,7 @@ async def ensure_tmux_for_ip(src_ip:str, env:dict):
     return name
 
 async def tmux_detach_all(name:str):
-    await run(TMUX, "detach", "-a", "-t", f"={name}")
+    await run(TMUX, "detach", "-a", "-s", f"={name}")
 
 def set_raw(fd): tty.setraw(fd, termios.TCSANOW)
 
