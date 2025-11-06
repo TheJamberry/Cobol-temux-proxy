@@ -86,13 +86,18 @@ async def run(*args, check=False):
         raise RuntimeError(f"{args} -> {proc.returncode}: {err.decode()}")
     return out.decode(), err.decode(), proc.returncode
 
+def tmux_name_for_ip(src_ip:str)->str:
+    return "ip_" + src_ip.replace(":", "_").replace(".", "_")
+
+
 async def tmux_has(name:str)->bool:
     _,_,rc = await run(TMUX,"has-session","-t",f"={name}")
     return rc==0
 
 async def ensure_tmux_for_ip(src_ip:str, env:dict):
-    name = "ip_" + src_ip.replace(":", "_").replace(".", "_")
+    name = tmux_name_for_ip(src_ip)
     if await tmux_has(name):
+        await run(TMUX, "set-option", "-t", f"={name}", "status", "off")
         return name
     env_cmd = ["/usr/bin/env"]
     for k, v in env.items():
@@ -100,6 +105,7 @@ async def ensure_tmux_for_ip(src_ip:str, env:dict):
             env_cmd.append(f"{k}={v}")
     env_cmd.append("/usr/local/bin/cobol-telnet.sh")
     await run(TMUX, "new-session", "-d", "-s", name, *env_cmd, check=True)
+    await run(TMUX, "set-option", "-t", f"={name}", "status", "off")
     return name
 
 async def tmux_detach_all(name:str):
