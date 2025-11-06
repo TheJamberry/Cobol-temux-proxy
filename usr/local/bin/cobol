@@ -70,10 +70,17 @@ path.write_text("\n".join(lines) + "\n")
 PY
 }
 
+tmux_name() {
+  local ip="$1"
+  ip="${ip//:/_}"
+  ip="${ip//./_}"
+  printf 'ip_%s' "$ip"
+}
+
 attach_tmux() {
   local name
-  name="${1//:/_}"
-  exec "$TMUX_BIN" attach -t "$name"
+  name="$(tmux_name "$1")"
+  exec "$TMUX_BIN" attach -t "=$name"
 }
 
 restart_service() {
@@ -95,8 +102,8 @@ case "$cmd" in
     printf 'SRC_IP\tPOOL_IP\tTMUX\n'
     awk -F, 'BEGIN{OFS="\t"} !/^#/ && NF {print $1,$2}' "$SESS" | while read -r ip alloc; do
       [[ -z "$ip" ]] && continue
-      name="${ip//:/_}"
-      if "$TMUX_BIN" has-session -t "$name" 2>/dev/null; then
+      name="$(tmux_name "$ip")"
+      if "$TMUX_BIN" has-session -t "=$name" 2>/dev/null; then
         status="RUNNING"
       else
         status="MISSING"

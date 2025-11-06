@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, os, pty, subprocess, sys, termios, tty, signal, ipaddress, shlex, json
+import asyncio, os, pty, subprocess, sys, termios, tty, signal, ipaddress, json
 from pathlib import Path
 
 ETC = Path("/etc/cobol-proxy")
@@ -7,6 +7,47 @@ CFG = ETC / "config.yml"
 SESS = ETC / "sessions.csv"  # "src_ip,allocated_pool_ip"
 
 TMUX = "/usr/bin/tmux"
+
+def _terminfo_dirs()->list[Path]:
+    dirs=[]
+    terminfo=os.environ.get("TERMINFO")
+    if terminfo:
+        dirs.append(Path(terminfo))
+    terminfo_dirs=os.environ.get("TERMINFO_DIRS","")
+    if terminfo_dirs:
+        dirs.extend(Path(p) for p in terminfo_dirs.split(":") if p)
+    dirs.extend(Path(p) for p in ("/usr/share/terminfo","/usr/lib/terminfo","/lib/terminfo","/etc/terminfo"))
+    uniq=[]
+    seen=set()
+    for d in dirs:
+        if d not in seen:
+            uniq.append(d)
+            seen.add(d)
+    return uniq
+
+def _terminfo_path(term:str)->Path|None:
+    if not term:
+        return None
+    first=term[0]
+    prefixes={first, first.lower()}
+    prefixes.add(f"{ord(first):02x}")
+    for base in _terminfo_dirs():
+        for pref in prefixes:
+            path=base/pref/term
+            if path.exists():
+                return base
+    return None
+
+def pick_term(preferred:str)->tuple[str, Path|None]:
+    candidates=[]
+    for cand in (preferred, os.environ.get("TERM"), "vt100", "vt220", "ansi", "linux", "xterm", "screen", "screen-256color"):
+        if cand and cand.lower()!="dumb" and cand not in candidates:
+            candidates.append(cand)
+    for cand in candidates:
+        base=_terminfo_path(cand)
+        if base:
+            return cand, base
+    return "vt100", _terminfo_path("vt100")
 
 IAC=255; WILL=251; WONT=252; DO=253; DONT=254; SB=250; SE=240
 
@@ -45,21 +86,30 @@ async def run(*args, check=False):
         raise RuntimeError(f"{args} -> {proc.returncode}: {err.decode()}")
     return out.decode(), err.decode(), proc.returncode
 
+def tmux_name_for_ip(src_ip:str)->str:
+    return "ip_" + src_ip.replace(":", "_").replace(".", "_")
+
+
 async def tmux_has(name:str)->bool:
-    _,_,rc = await run(TMUX,"has-session","-t",name)
+    _,_,rc = await run(TMUX,"has-session","-t",f"={name}")
     return rc==0
 
 async def ensure_tmux_for_ip(src_ip:str, env:dict):
-    name = src_ip.replace(":", "_")
+    name = tmux_name_for_ip(src_ip)
     if await tmux_has(name):
+        await run(TMUX, "set-option", "-t", f"={name}", "status", "off")
         return name
-    env_export = " ".join(shlex.quote(f'{k}={v}') for k,v in env.items() if v)
-    cmd = f"{env_export} /usr/local/bin/cobol-telnet.sh"
-    await run(TMUX, "new-session", "-d", "-s", name, cmd, check=True)
+    env_cmd = ["/usr/bin/env"]
+    for k, v in env.items():
+        if v:
+            env_cmd.append(f"{k}={v}")
+    env_cmd.append("/usr/local/bin/cobol-telnet.sh")
+    await run(TMUX, "new-session", "-d", "-s", name, *env_cmd, check=True)
+    await run(TMUX, "set-option", "-t", f"={name}", "status", "off")
     return name
 
 async def tmux_detach_all(name:str):
-    await run(TMUX, "detach", "-a", "-s", name)
+    await run(TMUX, "detach", "-a", "-t", f"={name}")
 
 def set_raw(fd): tty.setraw(fd, termios.TCSANOW)
 
@@ -121,10 +171,14 @@ def maybe_allocate_src_ip(src_ip:str, cfg:dict, sessions:dict)->str|None:
     save_sessions(sessions)
     return ip
 
-async def bridge(reader:asyncio.StreamReader, writer:asyncio.StreamWriter, tmux_name:str, detach_first:bool):
+async def bridge(reader:asyncio.StreamReader, writer:asyncio.StreamWriter, tmux_name:str, detach_first:bool, term_type:str, terminfo_dir:Path|None):
     pid, master_fd = pty.fork()
     if pid==0:
-        os.execl(TMUX, TMUX, "attach", "-t", tmux_name)
+        term = term_type or os.environ.get("TERM", "vt100") or "vt100"
+        os.environ["TERM"] = term
+        if terminfo_dir:
+            os.environ["TERMINFO"] = str(terminfo_dir)
+        os.execl(TMUX, TMUX, "attach", "-t", f"={tmux_name}")
     set_raw(master_fd)
     loop=asyncio.get_running_loop()
     tmux_reader=asyncio.StreamReader()
@@ -177,8 +231,13 @@ async def handle_client(reader, writer):
             "SRC_IP": src_bind or ""
         }
 
+        term_type, terminfo_dir = pick_term(env.get("TERM_TYPE",""))
+        env["TERM_TYPE"] = term_type
+        if terminfo_dir:
+            env.setdefault("TERMINFO", str(terminfo_dir))
+
         tmux_name = await ensure_tmux_for_ip(src_ip, env)
-        await bridge(reader, writer, tmux_name, detach_first)
+        await bridge(reader, writer, tmux_name, detach_first, term_type, terminfo_dir)
 
         # ===== NEW: cleanup after bridge ends =====
         # If COBOL closed, the launcher exited, tmux session should be gone.
