@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio, os, pty, subprocess, sys, termios, tty, signal, ipaddress, shlex, json
+import asyncio, os, pty, subprocess, sys, termios, tty, signal, ipaddress, json
 from pathlib import Path
 
 ETC = Path("/etc/cobol-proxy")
@@ -53,9 +53,12 @@ async def ensure_tmux_for_ip(src_ip:str, env:dict):
     name = src_ip.replace(":", "_")
     if await tmux_has(name):
         return name
-    env_export = " ".join(shlex.quote(f'{k}={v}') for k,v in env.items() if v)
-    cmd = f"{env_export} /usr/local/bin/cobol-telnet.sh"
-    await run(TMUX, "new-session", "-d", "-s", name, cmd, check=True)
+    env_cmd = ["/usr/bin/env"]
+    for k, v in env.items():
+        if v:
+            env_cmd.append(f"{k}={v}")
+    env_cmd.append("/usr/local/bin/cobol-telnet.sh")
+    await run(TMUX, "new-session", "-d", "-s", name, *env_cmd, check=True)
     return name
 
 async def tmux_detach_all(name:str):
